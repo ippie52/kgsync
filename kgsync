@@ -1,0 +1,707 @@
+#!/usr/bin/python
+## -----------------------------------------------------------------------------
+#  \file   kgsync.py
+#  \brief  Script to synchronise multiple git sub repositories in an easy to
+#
+#
+#  Script can be used to create and manage a manifest file, which is used to
+#  keep track of and update sub repositories within the current directory.
+#  Whilst git sub-modules work wonderfully, there are some situations whereby
+#  there can be problems initialising or updating them. As a result of this,
+#  this script is an attempt to manage sub repositories in a more controlled
+#  way.
+#  For run-time errors caused by bad input, permissions issues etc, a useful
+#  error message should be displayed followed by a polite exit.
+#  For errors caused by developers entering jibberish, an exception should be
+#  thrown.
+# ------------------------------------------------------------------------------
+#                  Kris Dunning ippie52@gmail.com 2016.
+# ------------------------------------------------------------------------------
+
+from sys import argv, exit
+from getopt import getopt
+from os.path import isdir, isfile, join
+from os import chdir, mkdir
+from subprocess import Popen, PIPE
+from pkgutil import simplegeneric
+import json
+
+# ------------------------------------------------------------------------------
+# Global definitions/variables
+# ------------------------------------------------------------------------------
+
+## Method to generate a named C-ish style enumeration
+def enum(**enums):
+    return type('Enum', (), enums)
+
+## Debug level enumerations
+DEBUG_LEVEL = enum(NONE     = 0,
+                   INFO     = 1,
+                   WARNING  = 2,
+                   ERROR    = 3,
+                   SUCCESS  = 4)
+
+## Example enumerations
+# EXAMPLE_LIST = enum(ALL         = "all",
+#                     GENERATE    = "generate",
+#                     ADD         = "add",
+#                     REMOVE      = "remove",
+#                     DEBUG       = "debug",
+#                     )
+
+## Dictionary of colours, keyed with their associated debug level
+COLORS = {DEBUG_LEVEL.NONE      : '\033[0m',
+          DEBUG_LEVEL.WARNING   : '\033[93m',
+          DEBUG_LEVEL.ERROR     : '\033[91m',
+          DEBUG_LEVEL.SUCCESS   : '\033[92m',
+          DEBUG_LEVEL.INFO      : '\033[94m' }
+
+## Dictionary of strings, keyed with their associated debug level
+STRINGS = {DEBUG_LEVEL.NONE      : '',
+           DEBUG_LEVEL.WARNING   : 'WARNING',
+           DEBUG_LEVEL.ERROR     : 'ERROR',
+           DEBUG_LEVEL.SUCCESS   : 'SUCCESS',
+           DEBUG_LEVEL.INFO      : 'INFO'}
+
+
+## The debug level for the script
+debug_level = DEBUG_LEVEL.NONE
+
+# ------------------------------------------------------------------------------
+# Constants
+# ------------------------------------------------------------------------------
+## The default manifest name
+DEFAULT_MANIFEST_NAME = "manifest.json"
+
+# ------------------------------------------------------------------------------
+#  The following functions are aimed to remove unsightly newlines and
+#  white-space from JSON files.
+# ------------------------------------------------------------------------------
+
+## Helper function to get items, used to
+@simplegeneric
+def get_items(obj):
+    while False:
+        yield None
+
+## Function to return the key value pair of a dictionary
+@get_items.register(dict)
+def _(obj):
+    return obj.iteritems()
+
+## Function to return the individual items of a list
+@get_items.register(list)
+def _(obj):
+    return enumerate(obj)
+
+## Function used to strip white-space from an object containing strings
+def strip_whitespace(json_data):
+    for k, v in get_items(json_data):
+        if hasattr(v, 'strip'): # string
+            json_data[k] = v.strip()
+        else:
+            strip_whitespace(v)
+
+# ------------------------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------------------------
+
+## Debug output function; uses the current debug level to print out the messages
+def debug_print(level, message, force=False):
+    if level >= debug_level or force:
+        print "%s%s:%s %s" % (COLORS[level], STRINGS[level], \
+            COLORS[DEBUG_LEVEL.NONE], message)
+
+
+# ------------------------------------------------------------------------------
+# Class definitions
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+## Option class. Used to generate argument options and allow for easy updates
+class Option:
+
+    ## Constructor
+    def __init__(self, short, description, long_arg=None, flag=None, default=None):
+        ## Short character description
+        self.short = short
+        ## Description of the option
+        self.desc = description
+        ## Flag to add to the option
+        self.flag = flag
+        if self.flag is not None and len(self.flag) > 10:
+            raise ValueError("Please shorten the flag name!")
+        ## Long character description
+        self.long = long_arg
+        if len(self.short) != 1:
+            raise ValueError("Short options must only be one character")
+
+        ## The value of this option
+        self.value = default
+
+    ## Gets the short option for getopt
+    def get_short(self):
+        return self.short + ":" if self.flag is not None else self.short
+
+    ## Gets the long option for getopt
+    def get_long(self):
+        val = ""
+        if self.long is not None:
+            val = self.long + "=" if self.flag is not None else self.long
+        return val
+
+    ## Gets the description of this argument
+    def get_description(self):
+        # Format the description, <-short flag> description
+        clip = "<-%s" % self.short
+        if self.flag is not  None:
+            clip += " %s" % self.flag
+        clip += ">"
+        clip = clip.ljust(16, " ")
+        desc = self.desc
+
+        # Append full stop if required
+        if desc[-1] != ".":
+            desc += "."
+        formatted = ""
+        # Format to line length of 80
+        d_len = len(desc) + len(clip)
+        ideal = 80 - len(clip)
+        while d_len > 80:
+            index = Option.get_index_of_space(desc, ideal)
+            formatted += desc[:index] + "\n"
+            desc = "".ljust(16, " ") + desc[index + 1:]
+            d_len = len(desc)
+            ideal = 80
+
+        # Append final line
+        formatted += desc
+        return COLORS[DEBUG_LEVEL.SUCCESS] + clip + COLORS[DEBUG_LEVEL.INFO] + formatted
+
+    ## Sets the found/default value of this flag
+    def set_value(self, arg, default=False):
+        if (self.flag is not None):
+            self.value = arg
+        else:
+            self.value = True
+
+    ## Gets the collection of possible options to check against the input
+    def get_opts(self):
+        return ["-%s" % self.short, "--%s"  % self.long]
+
+    ## Gets the collection of option names for this option
+    def get_names(self):
+        return [self.short, self.long]
+
+    ## Gets the string representation of this class
+    def __str__(self):
+        return self.short
+
+
+    ## Gets the last location of a space in the line of text, starting back from
+    #  the ideal index
+    @staticmethod
+    def get_index_of_space(line, ideal):
+        index = ideal
+        while index < len(line) and line[index] != " " and index > 0:
+            index -= 1
+        return index
+
+
+# ------------------------------------------------------------------------------
+## Class used to contain a collection of options and provide output short and
+#  long option strings for all options available.
+class Options:
+
+    ## Constructor
+    def __init__(self):
+        ## Collection of options for this application
+        self.options = []
+        ## The current value for iteration
+        self.current = 0
+
+    ## Adds an option
+    def add_option(self, option):
+        ## todo - Perhaps check for conflicting short/long values
+        self.options.append(option)
+
+    ## Gets the short option identifiers for all options
+    def get_short(self):
+        short = ""
+        for o in self.options:
+            short += o.get_short()
+        return short
+
+    ## Gets the long option identifiers for all options
+    def get_long(self):
+        long_o = []
+        for o in self.options:
+            long_o.append(o.get_long())
+        return long_o
+
+    ## Prints out the formatted option descriptions
+    def print_options(self):
+        for o in self.options:
+            print COLORS[DEBUG_LEVEL.INFO] + o.get_description() + COLORS[DEBUG_LEVEL.NONE]
+
+    ## Gets the iterator
+    def __iter__(self):
+        return self
+
+    ## Gets the next item in the iteration
+    def next(self):
+        if self.current >= len(self.options):
+            self.current = 0
+            raise StopIteration
+        else:
+            self.current += 1
+            return self.options[self.current -1]
+
+    ## Gets the option for the given option name
+    def get(self, name):
+        for o in self.options:
+            if name in o.get_names():
+                return o
+        raise ValueError("Could not find value %s" % name)
+
+
+# ------------------------------------------------------------------------------
+## This class contains the manifest information, used to add, remove, update or
+#  generate manifest json files.
+class Manifest:
+
+    ## Constructor
+    def __init__(self, filename, create=False):
+        ## The file name of this manifest file
+        self.filename = filename
+        ## Raw data obtained from the manifest
+        self.raw_data = None
+        ## The parsed data collection from the manifest file
+        self.data = {}
+        if not create:
+            if not self.load(self.filename):
+                debug_print(DEBUG_LEVEL.ERROR, "Could not load file %s." % self.filename)
+                exit(1)
+
+
+    ## Loads the existing manifest file
+    def load(self, filename):
+        result = False
+        if isfile(filename):
+            with open(filename, 'r') as man_file:
+                self.raw_data = man_file.read()
+                self.data = json.loads(self.raw_data)
+                strip_whitespace(self.data)
+                result = True
+        return result
+
+    ## Static method used to obtain the repository information for a directory
+    @staticmethod
+    def get_repo_info(directory):
+        # 1. Check directory contains git folder
+        git_location = join(directory, '.git')
+        if not isdir(git_location):
+            debug_print(DEBUG_LEVEL.ERROR, "Directory %s does not appear to contain a valid git repository." % directory)
+            exit(1)
+
+        # 2. Check to see whether it has any local changes
+        chdir(directory)
+        args = ['git', "diff-index", "--quiet", "HEAD", "--"]
+        p = Popen(args)
+        p.communicate()
+        has_modifications = p.returncode
+        # 3. Get the current sha1 ID of the commit
+        args = ['git', "rev-parse", "HEAD"]
+        p = Popen(args, stdout=PIPE)
+        commit_id = p.communicate()[0]
+        # 4. Get the remote information
+        # args = ['git', 'remote', '-v']
+        args = ['git', 'config', '--get', 'remote.origin.url']
+        p = Popen(args, stdout=PIPE)
+        origin = p.communicate()[0]
+        if origin is None:
+            debug_print(DEBUG_LEVEL.ERROR, "Could not obtain an origin directory for repository %d" % directory)
+            exit(1)
+
+        chdir("..")
+        info = { 'repo': directory, 'valid': True, 'modified': has_modifications, 'commit': commit_id, 'origin': origin }
+        strip_whitespace(info)
+        return info
+
+
+    ## Adds repositories to the manifest
+    def add(self, dirs):
+        existing = self.data.keys()
+        result = True
+        for d in dirs:
+            if d in existing:
+                # raise ValueError("Directory %s already exists; cannot add." % d)
+                debug_print(DEBUG_LEVEL.WARNING, "Directory '%s' already exists; cannot add." % d)
+                result = False
+            else:
+                debug_print(DEBUG_LEVEL.INFO, "Successfully added %s" % d)
+            rinfo = Manifest.get_repo_info(d)
+            self.data[d] = rinfo
+        return result
+
+
+    ## Removes repositories to the manifest
+    def rem(self, dirs):
+        result = True
+        existing = self.data.keys()
+        for d in dirs:
+            if d in existing:
+                debug_print(DEBUG_LEVEL.INFO, "Removing %s from the repository list" % d)
+                del self.data[d]
+            else:
+                debug_print(DEBUG_LEVEL.WARNING, "Cannot remove %s; it does not exist in the current manifest." % d)
+                result = False
+        return result
+
+    ## Performs a sanity check on the provided directories against the existing values
+    @staticmethod
+    def sanity_check(dirs, existing):
+        if dirs is not None:
+            for d in dirs:
+                if d not in existing:
+                    debug_print(DEBUG_LEVEL.ERROR, "%s is not a known repository." % d)
+                    exit(1)
+        return True
+
+
+    ## Updates one or more repositories. If no repositories are provided, all
+    #  will be updated
+    def update(self, dirs=None):
+        existing = self.data.keys()
+
+        # Quick sanity check on provided directories
+        Manifest.sanity_check(dirs, existing)
+
+        for e in existing:
+            if dirs is None or e in dirs:
+                debug_print(DEBUG_LEVEL.INFO, "Updating data in repository %s" % e)
+                self.data[e] = Manifest.get_repo_info(e)
+
+        return True
+
+    ## Synchronises one or more repositories. If no repositories are provided,
+    #  all will be synchronised. The quick flag will switch on/off quick sync,
+    #  and the stash flag will stash changes if present, otherwise an error will
+    #  be issued instead.
+    def sync(self, dirs=None, quick=False, stash=False):
+        existing = self.data.keys()
+        Manifest.sanity_check(dirs, existing)
+
+        for e in existing:
+            if dirs is None or e in dirs:
+                debug_print(DEBUG_LEVEL.INFO, "Synchronising repository %s" % e)
+                # Check directory exists, if not, clone it
+                if isdir(e):
+                    # 1a. Directory exists - go check what revision it's at
+                    info = Manifest.get_repo_info(e)
+                    if info['commit'] != self.data[e]['commit']:
+                        # Mismatch in revision - go check stuff
+                        debug_print(DEBUG_LEVEL.INFO, "Commit mismatch; attempting checkout at the required version")
+                        Manifest.checkout(e, self.data[e]['commit'], info['modified'], stash, quick)
+                    elif info['modified']:
+                        debug_print(DEBUG_LEVEL.WARNING, "Repository %s has been modified..." % e)
+                        if stash:
+                            debug_print(DEBUG_LEVEL.INFO, "Will now stash the changes...")
+                            Manifest.stash(e)
+                        else:
+                            debug_print(DEBUG_LEVEL.WARNING, "Repository %s has modifications!")
+                    else:
+                        debug_print(DEBUG_LEVEL.INFO, "No changes")
+                else:
+                    # 1b. Directory doesn't exist - clone it
+                    Manifest.clone(e, self.data[e]['origin'], self.data[e]['commit'], quick)
+        return True
+
+    ## Static method to clone a repository into a given directory
+    ## Returns True if  successful
+    @staticmethod
+    def clone(directory, remote, commit, quick):
+        result = False
+        if not quick:
+            debug_print(DEBUG_LEVEL.INFO, "Performing a full clone %s into directory %s, please wait..." % (remote, directory))
+            args = ['git', 'clone', remote, directory]
+            p = Popen(args)
+            p.communicate()
+            if p.returncode:
+                debug_print(DEBUG_LEVEL.ERROR, "Could not clone the repository: %s" % remote)
+            else:
+                result = True
+        else:
+            ## Todo - Fix this quick option, currently it won't work. Find another way of doing it.
+            return False
+            # 1. Create a bare git repository in the given directory
+            debug_print(DEBUG_LEVEL.INFO, "Performing quick clone of %s into directory %s, please wait..." % (remote, directory))
+            mkdir(directory)
+            chdir(directory)
+            args = ['git', 'init']
+            p = Popen(args)
+            p.communicate()
+            if p.returncode:
+                debug_print(DEBUG_LEVEL.ERROR, "Could not initialise git repository at %s" % directory)
+                chdir("..")
+            else:
+                # 2. Add the remote
+                args = ['git', 'remote', 'add', 'origin', remote]
+                p = Popen(args)
+                p.communicate()
+                if p.returncode:
+                    debug_print(DEBUG_LEVEL.ERROR, "Could not add remote %s to the repository")
+                    chdir("..")
+                else:
+                    #3. Fetch only the desired commit
+                    args = ['git', 'fetch', 'origin', commit]
+                    p = Popen(args)
+                    p.communicate()
+                    if p.returncode:
+                        debug_print(DEBUG_LEVEL.ERROR, "Problem fetching the commit at %s from 'origin'\n%s" % (commit, args))
+                        chdir("..")
+                    else:
+                        # 4. Reset to the given commit
+                        args = ['git', 'reset', '--hard', 'FETCH_HEAD']
+                        p = Popen(args)
+                        p.communicate()
+                        if p.returncode:
+                            debug_print(DEBUG_LEVEL.ERROR, "Could not reset to the fetched head")
+                        else:
+                            result = True
+                        chdir("..")
+
+    @staticmethod
+    def checkout(directory, commit, modified, stash, quick):
+        chdir(directory)
+        # 1. Check to see whether the commit currently exists in the logs
+        args = ['git', 'cat-file', '-t', commit]
+        p = Popen(args, stderr=PIPE, stdout=PIPE)
+        p.communicate()
+        if p.returncode:
+            debug_print(DEBUG_LEVEL.INFO, "Commit %s does not exist, retrieving..." % commit)
+            # Doesn't exist, check whether we want a full fetch
+        # else:
+            # Does exist, just perform checkout
+        args = ['git', 'checkout', commit]
+        p = Popen(args, stdout=PIPE)
+        p.communicate()
+        if p.returncode:
+            debug_print(DEBUG_LEVEL.ERROR, "Could not check out the commit %s" % commit)
+        else:
+            debug_print(DEBUG_LEVEL.SUCCESS, "Updated %s to commit %s" % (directory, commit))
+        chdir("..")
+        return True
+
+
+    ## Stashes the local changes (if possible) to the repository
+    ## Returns True if successful
+    @staticmethod
+    def stash(directory):
+        chdir(directory)
+        args = ['git', 'stash']
+        p = Popen(args)
+        p.communicate()
+        chdir("..")
+        return not p.returncode
+
+
+    ## Saves changes to the manifest file in JSON format
+    def save(self, filename=None):
+        result = False
+        if filename is None:
+            filename = self.filename
+        debug_print(DEBUG_LEVEL.INFO, "Writing to file: %s" % filename)
+        with open(filename, 'w') as json_file:
+            json_file.write(json.dumps(self.data, sort_keys=True, indent=4, separators=(',', ': '), ensure_ascii=True))
+            result = True
+        return result
+
+    ## Provides the string representation of the manifest
+    def __str__(self):
+        return self.filename
+
+
+
+# ------------------------------------------------------------------------------
+# Options construction
+# ------------------------------------------------------------------------------
+
+## The options for this script
+options = Options()
+options.add_option(Option("g", "Generates a new manifest file (requires directory argument -d).", "generate"))
+options.add_option(Option("o", "Specifies the output file name of the manifest file when generating, updating or amending." , \
+                          "output", "file.json"))
+options.add_option(Option("a", "Adds a sub repository to the manifest file (requires directory argument -d)", "add"))
+options.add_option(Option("r", "Removes a sub repository from the manifest file (required directory argument -d).", "remove"))
+options.add_option(Option("d", "Specifies which directories to include in the command (use commas to separate multiple directories).", \
+                          "directories", "dir1,dir2"))
+options.add_option(Option("m", "Specifies the name of the manifest file to use as input", "manifest", "file.json", DEFAULT_MANIFEST_NAME))
+options.add_option(Option("u", "Updates the commit ID used for each repository to match the current commit ID", "update"))
+options.add_option(Option("q", "Quick clone/checkout performed - Could be beneficial for large repositories", "quick"))
+options.add_option(Option("s", "Stashes any changes before syncing, generating or updating", "stash"))
+options.add_option(Option("h", "Display this usage information", "help"))
+options.add_option(Option("D", "Sets the level of debug (default warning and above)", "debug", "level", DEBUG_LEVEL.INFO))
+options.add_option(Option("x", "Displays an appropriate example display", "example", ))
+
+
+## Displays the usage of this script
+def usage(message=None):
+    if message is not None:
+        debug_print(DEBUG_LEVEL.ERROR, message, True)
+    print COLORS[DEBUG_LEVEL.SUCCESS] + "\nUsage instructions for %s\n" % argv[0] + COLORS[DEBUG_LEVEL.NONE]
+    options.print_options()
+
+
+## Confirms directories - The function will return True if all directories exist
+def confirm_dirs_exist(dirs):
+    if dirs is None or len(dirs) < 1:
+        usage("Error, directories required for this operation")
+        exit(1)
+    all_exist = True
+    for d in dirs:
+        all_exist = all_exist and isdir(d)
+    return all_exist
+
+## Checks that all repositories are free from changes, or stashes them if permitted
+def check_repos_and_stash(manifest, stash):
+    for directory, values in manifest.data.iteritems():
+        if manifest.data[directory]['modified']:
+            if stash:
+                if not Manifest.stash(directory):
+                    debug_print(DEBUG_LEVEL.ERROR, "Error attempting to stash changes in directory %s." % directory)
+                    exit(1)
+                else:
+                    debug_print(DEBUG_LEVEL.WARNING, "Stashed changes in %s" % directory)
+            else:
+                debug_print(DEBUG_LEVEL.ERROR, "Modifications present in %s. Please stash or commit these before continuing." % directory)
+                return False
+    return True
+
+## Generates a manifest file for the given repositories
+def generate_repos(dirs, manifest, stash):
+    if confirm_dirs_exist(dirs): # Will raise error if directories not provided
+        debug_print(DEBUG_LEVEL.INFO, "Generating manifest: %s" % manifest)
+        if manifest.add(dirs) and check_repos_and_stash(manifest, stash):
+            if manifest.save():
+                debug_print(DEBUG_LEVEL.SUCCESS, "Manifest file %s generated." % manifest)
+            else:
+                debug_print(DEBUG_LEVEL.ERROR, "Failed to save file %s" % manifest)
+        else:
+            debug_print(DEBUG_LEVEL.ERROR, "There was a problem adding directories to the manifest.")
+    else:
+        usage("To generate a manifest file, all provided directories must exist")
+        exit(1)
+    return True
+
+
+## Adds repositories to the manifest file
+def add_repos(dirs, manifest, stash, filename):
+    if confirm_dirs_exist(dirs): # Will raise error if directories not provided
+        debug_print(DEBUG_LEVEL.INFO, "Adding to manifest: %s" % manifest)
+        if manifest.add(dirs) and check_repos_and_stash(manifest, stash):
+            if manifest.save(filename):
+                debug_print(DEBUG_LEVEL.SUCCESS, "Directories were successfully added to %s." % manifest)
+            else:
+                debug_print(DEBUG_LEVEL.ERROR, "Failed to save file %s" % manifest)
+        else:
+            debug_print(DEBUG_LEVEL.ERROR, "There was a problem adding directories to the manifest.")
+    else:
+        usage("To add repositories, all provided directories must exist.")
+        exit(1)
+
+## updates repositories in the current manifest file
+def update_repos(dirs, manifest, stash, filename):
+    if dirs is not None:
+        confirm_dirs_exist(dirs) # Will raise error if directories not provided
+    debug_print(DEBUG_LEVEL.INFO, "Updating manifest: %s" % manifest)
+    if manifest.update(dirs) and check_repos_and_stash(manifest, stash):
+        manifest.save(filename)
+    else:
+        debug_print(DEBUG_LEVEL.ERROR, "There was a problem updating the manifest.")
+    return True
+
+## Removes repositories from the manifest file
+def remove_repos(dirs, manifest, filename):
+    confirm_dirs_exist(dirs) # Will raise error if directories not provided, don't care if they don't exist any more
+    debug_print(DEBUG_LEVEL.INFO, "Removing from manifest: %s" % manifest)
+    if manifest.rem(dirs): # Don't need to check whether they have local modifications. Screw 'em!
+        if manifest.save(filename):
+            debug_print(DEBUG_LEVEL.SUCCESS, "Directories were successfully removed from %s." % manifest)
+        else:
+            debug_print(DEBUG_LEVEL.ERROR, "Failed to save file %s" % manifest)
+    else:
+        debug_print(DEBUG_LEVEL.ERROR, "Failed to remove requested directories from the manifest %s" % manifest)
+
+
+## Synchronises the repositories
+#
+# If no directories are provided, all will be synchronised
+# If quick is set to true, clones and checkouts will be performed on a minimalistic basis
+# If stash is set to true, any changes will be stashed before applying the sync
+def sync_repos(dirs, manifest, quick, stash):
+    if dirs is not None:
+        confirm_dirs_exist(dirs)
+    debug_print(DEBUG_LEVEL.INFO, "Synchronising repositories in manifest: %s" % manifest)
+    if manifest.sync(dirs, quick, stash):
+        debug_print(DEBUG_LEVEL.SUCCESS, "Synchronisation complete.")
+    else:
+        debug_print(DEBUG_LEVEL.ERROR, "There was a problem synchronising the repositories.")
+
+
+## Parses a string to obtain a list of directories
+def parse_dirs(line):
+    dirs = None
+    if line is not None:
+        dirs = line.split(',')
+    return dirs
+
+## Options and unused arguments
+opts, args = getopt(argv[1:], options.get_short(), options.get_long())
+
+for o, a in opts:
+    for known in options:
+        if o in known.get_opts():
+            known.set_value(a)
+
+# Check for help
+if options.get('help').value:
+    usage()
+    exit(0)
+
+debug_level = int(options.get('debug').value)
+
+# Check to see whether add, remove, update or generate options have been signalled
+## The directories provided
+directories = parse_dirs(options.get('directories').value)
+## The input file to be read/written
+input_file = options.get('manifest').value
+## The output file to be written
+output_file = options.get('output').value
+## Stash flag
+stash = options.get('stash').value
+## The manifest file
+manifest = None
+
+# Generate manifest file
+if options.get('generate').value:
+    output_file = output_file if output_file is not None else DEFAULT_MANIFEST_NAME
+    manifest = Manifest(output_file, True)
+    generate_repos(directories, manifest, stash)
+# Adds a directory to the manifest
+elif options.get('add').value:
+    manifest = Manifest(input_file)
+    add_repos(directories, manifest, stash, output_file)
+# Removes a directory from the manifest
+elif options.get('remove').value:
+    manifest = Manifest(input_file)
+    remove_repos(directories, manifest, output_file)
+# Updates the current directories commits
+elif options.get('update').value:
+    manifest = Manifest(input_file)
+    update_repos(directories, manifest, stash, output_file)
+# Synchronises the directories to match the required values
+else:
+    manifest = Manifest(input_file)
+    sync_repos(directories, manifest, options.get('q').value, stash)
+
