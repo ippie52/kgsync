@@ -30,6 +30,8 @@ import json
 # Global definitions/variables
 # ------------------------------------------------------------------------------
 
+KGSYNC_VERSION = (0.1)
+
 ## Method to generate a named C-ish style enumeration
 def enum(**enums):
     return type('Enum', (), enums)
@@ -41,6 +43,7 @@ DEBUG_LEVEL = enum(NONE     = 0,
                    ERROR    = 3,
                    SUCCESS  = 4)
 
+## todo - add example list (probably from readme)
 ## Example enumerations
 # EXAMPLE_LIST = enum(ALL         = "all",
 #                     GENERATE    = "generate",
@@ -154,29 +157,31 @@ class Option:
     def get_description(self):
         # Format the description, <-short flag> description
         clip = "<-%s" % self.short
+        # Add the long arg
+        if self.long is not None:
+            clip += "|--%s" % self.long
+        # Add the flag
         if self.flag is not  None:
             clip += " %s" % self.flag
         clip += ">"
         clip = clip.ljust(16, " ")
-        desc = self.desc
+        desc = "".ljust(16) + self.desc
 
         # Append full stop if required
         if desc[-1] != ".":
             desc += "."
         formatted = ""
         # Format to line length of 80
-        d_len = len(desc) + len(clip)
         ideal = 80 - len(clip)
-        while d_len > 80:
+        while len(desc) > 80:
             index = Option.get_index_of_space(desc, ideal)
             formatted += desc[:index] + "\n"
             desc = "".ljust(16, " ") + desc[index + 1:]
-            d_len = len(desc)
             ideal = 80
 
         # Append final line
         formatted += desc
-        return COLORS[DEBUG_LEVEL.SUCCESS] + clip + COLORS[DEBUG_LEVEL.INFO] + formatted
+        return "%s%s\n%s%s" % (COLORS[DEBUG_LEVEL.SUCCESS], clip, COLORS[DEBUG_LEVEL.INFO], formatted)
 
     ## Sets the found/default value of this flag
     def set_value(self, arg, default=False):
@@ -278,6 +283,7 @@ class Manifest:
         self.raw_data = None
         ## The parsed data collection from the manifest file
         self.data = {}
+        self.data['meta'] = { 'version': KGSYNC_VERSION }
         if not create:
             if not self.load(self.filename):
                 debug_print(DEBUG_LEVEL.ERROR, "Could not load file %s." % self.filename)
@@ -471,6 +477,7 @@ class Manifest:
                             result = True
                         chdir("..")
 
+    ## Checks out a particular commit (if possible) and stashes where permitted
     @staticmethod
     def checkout(directory, commit, modified, stash, quick):
         chdir(directory)
@@ -534,15 +541,13 @@ options.add_option(Option("o", "Specifies the output file name of the manifest f
                           "output", "file.json"))
 options.add_option(Option("a", "Adds a sub repository to the manifest file (requires directory argument -d)", "add"))
 options.add_option(Option("r", "Removes a sub repository from the manifest file (required directory argument -d).", "remove"))
-options.add_option(Option("d", "Specifies which directories to include in the command (use commas to separate multiple directories).", \
-                          "directories", "dir1,dir2"))
 options.add_option(Option("m", "Specifies the name of the manifest file to use as input", "manifest", "file.json", DEFAULT_MANIFEST_NAME))
 options.add_option(Option("u", "Updates the commit ID used for each repository to match the current commit ID", "update"))
 options.add_option(Option("q", "Quick clone/checkout performed - Could be beneficial for large repositories", "quick"))
 options.add_option(Option("s", "Stashes any changes before syncing, generating or updating", "stash"))
-options.add_option(Option("h", "Display this usage information", "help"))
-options.add_option(Option("D", "Sets the level of debug (default warning and above)", "debug", "level", DEBUG_LEVEL.INFO))
 options.add_option(Option("x", "Displays an appropriate example display", "example", ))
+options.add_option(Option("d", "Sets the level of debug (default warning and above)", "debug", "level", DEBUG_LEVEL.INFO))
+options.add_option(Option("h", "Display this usage information", "help"))
 
 
 ## Displays the usage of this script
@@ -648,14 +653,6 @@ def sync_repos(dirs, manifest, quick, stash):
     else:
         debug_print(DEBUG_LEVEL.ERROR, "There was a problem synchronising the repositories.")
 
-
-## Parses a string to obtain a list of directories
-def parse_dirs(line):
-    dirs = None
-    if line is not None:
-        dirs = line.split(',')
-    return dirs
-
 ## Options and unused arguments
 opts, args = getopt(argv[1:], options.get_short(), options.get_long())
 
@@ -673,7 +670,8 @@ debug_level = int(options.get('debug').value)
 
 # Check to see whether add, remove, update or generate options have been signalled
 ## The directories provided
-directories = parse_dirs(options.get('directories').value)
+directories = args
+print "Here's the dirs: %s" % args
 ## The input file to be read/written
 input_file = options.get('manifest').value
 ## The output file to be written
