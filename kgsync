@@ -206,6 +206,7 @@ class Manifest:
                 debug_print(DEBUG_LEVEL.INFO, "Successfully added %s" % d)
             rinfo = Manifest.get_repo_info(d)
             self.data[Manifest.ELE.DIRS][d] = rinfo
+            existing.append(d)
         return result
 
 
@@ -217,6 +218,7 @@ class Manifest:
             if d in existing:
                 debug_print(DEBUG_LEVEL.INFO, "Removing %s from the repository list" % d)
                 del self.data[Manifest.ELE.DIRS][d]
+                existing.remove(d)
             else:
                 debug_print(DEBUG_LEVEL.WARNING, "Cannot remove %s; it does not exist in the current manifest." % d)
                 result = False
@@ -518,7 +520,7 @@ def sync_repos(dirs, manifest, minimal, stash):
 opts, args = parser.parse_args()
 
 ## The directories provided
-directories = args
+directories = [d.strip('/') for d in args]
 
 # debug_level = int(options.get('debug').value)
 debug_level = int(opts.debug)
