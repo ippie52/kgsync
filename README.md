@@ -15,6 +15,7 @@ Repositories are tracked using the kgsync tool, which keep track of changes usin
  - [Generating the initial manifest](#generating-the-initial-manifest)
  - [Removing repositories from the manifest](#removing-repositories-from-the-manifest)
  - [Adding repositories to the manifest](#adding-repositories-to-the-manifest)
+ - [Viewing the current status](#viewing-the-current-status)
  - [Updating the manifest](#updating-the-manifest)
  - [Synchronising repositories](#synchronising-repositories)
  - [Input and output files](#input-and-output-files)
@@ -74,6 +75,7 @@ Options:
                         (required directory argument -d).
   -u, --update          Updates the commit ID used for each repository to
                         match the current commit ID
+  -s, --sync            Synchronise repositories
   -o file.json, --output=file.json
                         Specifies the output file name of the manifest file
                         when generating, updating or amending.
@@ -81,10 +83,11 @@ Options:
                         Specifies the name of the input manifest file
   -m, --minimal         Minimalistic clone. Potentially beneficial for large
                         repositories (may be slower)
-  -s, --stash           Stashes any changes before syncing, generating or
+  -S, --stash           Stashes any changes before syncing, generating or
                         updating
   -d level, --debug=level
                         Sets the level of debug (default warning and above)
+
 
 ```
 
@@ -240,6 +243,20 @@ Contents of the ```manifest.json``` file:
 ```
 The above is now the same as the initial file generated.
 
+## Viewing the current status
+The default operation of ```kgsync``` will simply show the current status of the tracked repositories found in the manifest file.
+
+```user@ubuntu:~/parent_repository$ kgsync```
+
+Expected output:
+```
+UP TO DATE:    repo_3@166ddc331eefb3cdc6c0a0c693636160b6999ba4 (modified)
+UP TO DATE:    repo_2@a31cadb3232a48c2512445f99ec71bc0b3d7e24d
+OUT OF DATE:   repo_1@7e39d63eecb5d58367f706d867157b6682203f8b
+```
+
+This list should show whether a repository is up to date, out of date, and whether or not is has any local modifications.
+
 ## Updating the manifest
 When the time comes to update the manifest to point a repository at a different commit, simply update the remote's content as required, then run the following:
 
@@ -289,14 +306,14 @@ Contents of the ```manifest.json``` file:
 Noting that the SHA1 for repo_2 has been updated from ```a31cadb3232a48c2512445f99ec71bc0b3d7e24d``` to ```d4d06e18a0bd0725c57df3a08fb06153010d2713```.
 
 ## Synchronising repositories
-This is the main function of the kgsync tool, and as such, this can be performed by simply calling ```kgsync``` without any arguments.
+This is the main function of the kgsync tool, and as such, this can be performed by simply calling ```kgsync -s```.
 
 For this example, assume that a fresh clone of the parent repository has been performed:
 
 ```
 user@ubuntu:~$ git clone http://example.com/parent.git/
 user@ubuntu:~$ cd parent
-user@ubuntu:~/parent$ kgsync
+user@ubuntu:~/parent$ kgsync -s
 ```
 
 Expected output:

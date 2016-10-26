@@ -19,7 +19,6 @@
 # ------------------------------------------------------------------------------
 
 from sys import argv, exit
-from getopt import getopt
 from os.path import isdir, isfile, join
 from os import chdir, mkdir
 from subprocess import Popen, PIPE
@@ -92,7 +91,7 @@ def _(obj):
 def strip_whitespace(json_data):
     for k, v in get_items(json_data):
         if hasattr(v, 'strip'): # string
-            json_data[k] = v.strip()
+            json_data[k] = str(v.strip())
         else:
             strip_whitespace(v)
 
@@ -283,6 +282,41 @@ class Manifest:
                     Manifest.clone(e, self.data[Manifest.ELE.DIRS][e]['origin'], self.data[Manifest.ELE.DIRS][e]['commit'], minimal)
         return True
 
+    ## Displays the status of the current repositories tracked in the manifest file
+    def display_status(self, dirs):
+        existing = self.data[Manifest.ELE.DIRS].keys()
+        Manifest.sanity_check(dirs, existing)
+
+        for e in existing:
+            if len(dirs) == 0 or e in dirs:
+                if isdir(e):
+                    # Get the current status of the
+                    info = Manifest.get_repo_info(e)
+                    # Is the commit different?
+                    if info['commit'] != self.data[Manifest.ELE.DIRS][e]['commit']:
+                        # Are there local modifications
+                        if info['modified']:
+                            Manifest.format_status(COLORS[DEBUG_LEVEL.ERROR], "OUT OF DATE", info)
+                        else:
+                            Manifest.format_status(COLORS[DEBUG_LEVEL.WARNING], "OUT OF DATE", info)
+                    else:
+                        if info['modified']:
+                            Manifest.format_status(COLORS[DEBUG_LEVEL.WARNING], "UP TO DATE", info)
+                        else:
+                            Manifest.format_status(COLORS[DEBUG_LEVEL.SUCCESS], "UP TO DATE", info)
+
+                else:
+                    Manifest.format_status(COLORS[DEBUG_LEVEL.ERROR], "MISSING", info)
+
+    ## Formats the status into a standard for the system
+    @staticmethod
+    def format_status(col, status, info):
+        status = "%s%s:" % (col, status)
+        status = status.ljust(20, ' ')
+        mod_status = "(modified)" if info['modified'] else ""
+        print "%s%s@%s %s%s" % (status, info['repo'], info['commit'], mod_status, COLORS[DEBUG_LEVEL.NONE])
+
+
     ## Static method to clone a repository into a given directory
     ## Returns True if  successful
     @staticmethod
@@ -372,7 +406,6 @@ class Manifest:
         chdir("..")
         return not p.returncode
 
-
     ## Saves changes to the manifest file in JSON format
     def save(self, filename=None):
         result = False
@@ -412,11 +445,12 @@ parser.add_option("-g", "--generate", action="store_true", help="Generates a new
 parser.add_option("-a", "--add", action="store_true", help="Adds a sub repository to the manifest file (requires directory argument -d)")
 parser.add_option("-r", "--remove", action="store_true", help="Removes a sub repository from the manifest file (required directory argument -d).")
 parser.add_option("-u", "--update", action="store_true", help="Updates the commit ID used for each repository to match the current commit ID", metavar="update")
+parser.add_option("-s", "--sync", action="store_true", help="Synchronise repositories")
 parser.add_option("-o", "--output", help="Specifies the output file name of the manifest file when generating, updating or amending." , \
                           metavar="file.json")
 parser.add_option("-i", "--input", help="Specifies the name of the input manifest file", metavar="file.json", default=DEFAULT_MANIFEST_NAME)
 parser.add_option("-m", "--minimal", action="store_true", help="Minimalistic clone. Potentially beneficial for large repositories (may be slower)")
-parser.add_option("-s", "--stash", action="store_true", help="Stashes any changes before syncing, generating or updating")
+parser.add_option("-S", "--stash", action="store_true", help="Stashes any changes before syncing, generating or updating")
 parser.add_option("-d", "--debug", help="Sets the level of debug (default warning and above)", metavar="level", default=DEBUG_LEVEL.INFO)
 
 
@@ -500,6 +534,10 @@ def remove_repos(dirs, manifest, filename):
         debug_print(DEBUG_LEVEL.ERROR, "Failed to remove requested directories from the manifest %s" % manifest)
     return result
 
+## Displays the current status of the manifest and the tracked repositories
+def display_repo_status(manifest, directories):
+    manifest.display_status(directories)
+
 
 ## Synchronises the repositories
 #
@@ -532,19 +570,18 @@ primary_count += 1 if opts.generate else 0
 primary_count += 1 if opts.add else 0
 primary_count += 1 if opts.remove else 0
 primary_count += 1 if opts.update else 0
+primary_count += 1 if opts.sync else 0
 
 if primary_count > 1:
-    usage(parser, DEBUG_LEVEL.ERROR, "Only one action can be provided (generate, update, add, or remove)", 1)
+    usage(parser, DEBUG_LEVEL.ERROR, "Only one action can be provided (generate, update, add, remove or sync)", 1)
 elif primary_count == 1 and not confirm_dirs_exist(directories):
     usage(parser, DEBUG_LEVEL.ERROR, "Not all directories exist. Ensure directories are listed after all options", 1)
-
 
 
 ## Stash flag
 stash = opts.stash
 ## The manifest file
 manifest = None
-
 
 # Generate manifest file
 if opts.generate:
@@ -565,7 +602,11 @@ elif opts.update:
     manifest = Manifest(opts.input)
     update_repos(directories, manifest, stash, opts.output)
 # Synchronises the directories to match the required values
-else:
+elif opts.sync:
     manifest = Manifest(opts.input)
     sync_repos(directories, manifest, opts.minimal, stash)
+# Displays the manifest information
+else:
+    manifest = Manifest(opts.input)
+    display_repo_status(manifest, directories)
 
