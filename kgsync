@@ -289,6 +289,7 @@ class Manifest:
 
         for e in existing:
             if len(dirs) == 0 or e in dirs:
+                info = self.data[Manifest.ELE.DIRS][e]
                 if isdir(e):
                     # Get the current status of the
                     info = Manifest.get_repo_info(e)
